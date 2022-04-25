@@ -5,6 +5,12 @@
     "folders": [
         {
             "name": "Exchange"
+        },
+        {
+            "name": "工作笔记"
+        },
+        {
+            "name": "Docker"
         }
     ],
     "id": "1",
