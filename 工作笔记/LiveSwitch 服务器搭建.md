@@ -175,6 +175,8 @@ docker run -d \
     --env CONNECTIONSTRINGS:DEFAULT='postgres://postgres:Ambow99999999@127.0.0.1:5432/postgres' \
     --env CONNECTIONSTRINGS:CACHE='redis://127.0.0.1' \
     --env SERVICEBASEURL='http://127.0.0.1:8080' \
+    --env EXTERNAL:PUBLICIPADDRESS=1.119.165.244 \
+    --env EXTERNAL:PUBLICHOSTNAME=dev-liveswitch.oook.cn \
     --network host \
     --restart always \
     --ulimit nofile=65535:65535 \
@@ -190,6 +192,7 @@ docker run -d \
 | REGION                    | -         | LiveSwitch 网关在选择 LiveSwitch 媒体服务器来处理入站客户端流时使用的字符串值。指示区域的客户端将尽可能与具有匹配值的媒体服务器匹配 |
 | INTERNAL:IPADDRESSES      | 0.0.0.0   | 内部监听的 IP 地址或 CIDR 范围                                                                                                      |
 | EXTERNAL:IPADDRESSES      | 0.0.0.0   | 外部监听的 IP 地址或 CIDR 范围                                                                                                      |
+| EXTERNAL:PUBLICIPADDRESS | - | 可从外部访问的当前机器的公共 IP 地址。如果设置，这将覆盖部署配置中外部 STUN 服务器提供的自动检测。 |
 | EXTERNAL:PUBLICHOSTNAME   | -         | 可以从外部访问的当前服务器的 DNS 地址，如果开启了 TURNS 此配置项必须配置                                                            |
 
 
@@ -272,7 +275,75 @@ docker run -d \
 | ------------------------- | --------- | --------------------------------------------------------------------------------------------------------------------- |
 | CONNECTIONSTRINGS:DEFAULT | 127.0.0.1 | 与 [ServiceStack.Redis](https://github.com/ServiceStack/ServiceStack.Redis#redis-connection-strings) 兼容的连接字符串 |
 
-## 3. 参考
+
+## 3. 问题收集
+
+### 3.1. 无法收到任何应答
+
+**问题详细**
+
+IOS 人员调试时通过 `dev-liveswitch.oook.cn` LiveSwitch 网关无法连接，报错日志如下：
+
+```bash
+2022-04-30 11:28:01.073996+0800 SwitchLiveDemo[599:131495] [connection] nw_resolver_start_query_timer_block_invoke [C1] Query fired: did not receive all answers in time for dev-liveswitch.oook.cn:443
+2022-04-30 11:28:01.941865+0800 SwitchLiveDemo[599:131532] [connection] nw_resolver_start_query_timer_block_invoke [C2] Query fired: did not receive all answers in time for dev-liveswitch.oook.cn:443
+2022-04-30 11:28:01.989164+0800 SwitchLiveDemo[599:131511] [LiveSwitch][599][10796688896] WARN    [FMLiveSwitchIceDatagramSocketManager][-] 2022-04-30T03:28:01.988Z Allocate request from 192.168.1.10:55148 to 1.202.193.88:3478 timed out.
+```
+
+**问题排查**
+
+- 首先，从目的套接字 `1.202.193.88:3478` 中的 `3478` 这个端口我并没有开放。而 `3478` 又是 LiveSwitch Media Server 的端口号。因此可以判断，客户端也需要直接连接 LiveSwitch Media Server 的 3348 端口号；
+- 其次，`1.202.193.88` 这个公网 IP 地址和我们无关，不知道怎么生成的这个公网 IP 地址。
+
+所以我们要开放这个端口号，并尝试修复这个公网地址。
+
+从管理后台查到这个  IP 地址：
+
+![Media Servers PublicIPAddress 信息](https://cdn.jsdelivr.net/gh/jugggao/image-hosting/images_for_notes/20220430161600.png)
+
+的确是错误的。
+
+**问题解决**
+
+1. 解决公网 IP 地址错误
+
+    部署 LiveSwitch Media Server 时，我没有指定 `EXTERNAL:PUBLICIPADDRESS` 和 `EXTERNAL:PUBLICHOSTNAME`（环境变量含义参考上文）。因此 LiveSwitch Media Server 会采用自动发现来自动配置公网 IP，很明显这个自动发现的是错误的（目前还不知道为什么自动发现错误），因此我们需要手动配置这两个环境变量去指定公网 IP 和公网域名，重新部署 LiveSwitch Media Server：
+
+    ```bash
+    docker run -d \
+        --env CONNECTIONSTRINGS:DEFAULT='postgres://postgres:Ambow99999999@127.0.0.1:5432/postgres' \
+        --env CONNECTIONSTRINGS:CACHE='redis://127.0.0.1' \
+        --env SERVICEBASEURL='http://127.0.0.1:8080' \
+        --env EXTERNAL:PUBLICIPADDRESS=1.119.165.244 \
+        --env EXTERNAL:PUBLICHOSTNAME=dev-liveswitch.oook.cn \
+        --network host \
+        --restart always \
+        --ulimit nofile=65535:65535 \
+        --name liveswitch-media-server \
+        frozenmountain/liveswitch-media-server
+    ```
+
+2. 解决端口号不通的问题
+
+    Media Server 主动监听 UDP/TCP 的 3478 端口号：
+
+    ```
+    $ netstat -anputl |grep 3478
+    tcp        0      0 172.18.0.1:3478         0.0.0.0:*               LISTEN      520240/dotnet       
+    tcp        0      0 10.10.113.23:3478       0.0.0.0:*               LISTEN      520240/dotnet       
+    udp        0      0 172.18.0.1:3478         0.0.0.0:*                           520240/dotnet       
+    udp        0      0 10.10.113.23:3478       0.0.0.0:*                           520240/dotnet
+    ```
+
+    开放此端口号后，问题解决，客户端成功可以建立连接，连接如下图所示。
+
+    ![3478 端口号连接](https://cdn.jsdelivr.net/gh/jugggao/image-hosting/images_for_notes/企业微信截图_16513046849517.png)
+
+现在观察后台的信息，发现 IP 地址已经显示成我映射的公网 IP 了。
+
+![LiveSwitch Media Server 正确公网信息](https://cdn.jsdelivr.net/gh/jugggao/image-hosting/images_for_notes/20220430163250.png)
+
+## 4. 参考
 
 - https://developer.liveswitch.io/liveswitch-server/server/server.html
 - https://developer.liveswitch.io/liveswitch-server/server/install/install-using-docker.html
